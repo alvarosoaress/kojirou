@@ -51,6 +51,7 @@ func (c *Client) GetManga(ctx context.Context, mangaID string) (*Manga, error) {
 func (c *Client) GetFeed(ctx context.Context, mangaID string, args QueryArgs) (*ChapterList, error) {
 	v := new(ChapterList)
 	url := fmt.Sprintf("/manga/%v/feed?%v", mangaID, args.Values().Encode())
+
 	err := c.doJSON(ctx, "GET", url, v, nil)
 	return v, err
 }

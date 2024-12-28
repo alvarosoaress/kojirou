@@ -83,6 +83,7 @@ func (c *Client) FetchChapters(ctx context.Context, mangaID string) (ChapterList
 			EmptyPages:    "0",
 			FuturePublish: "0",
 			ExternalURL:   "0",
+			ContentRating: []string{"safe", "suggestive", "erotica", "pornographic"},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("get chapters: %w", err)

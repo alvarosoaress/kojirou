@@ -18,6 +18,7 @@ type QueryArgs struct {
 	EmptyPages    string            `url:"includeEmptyPages"`
 	FuturePublish string            `url:"includeFuturePublishAt"`
 	ExternalURL   string            `url:"includeExternalUrl"`
+	ContentRating []string          `url:"contentRating"`
 }
 
 func (a QueryArgs) Values() url.Values {
