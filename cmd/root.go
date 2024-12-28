@@ -30,6 +30,7 @@ var (
 	volumesFilter       string
 	helpRankingFlag     bool
 	helpFilterFlag      bool
+	gammaArg			float64
 )
 
 var rootCmd = &cobra.Command{
@@ -174,6 +175,7 @@ func init() {
 	rootCmd.Flags().BoolVarP(&autocropArg, "autocrop", "a", false, "crop whitespace from pages automatically")
 	rootCmd.Flags().BoolVarP(&rotateAndSplitArg, "rotateAndSplit", "S", false, "rotate and split double panels pages into two new separate pages")
 	rootCmd.Flags().BoolVarP(&rotateArg, "rotate", "H", false, "rotate horizontally double panels pages")
+	rootCmd.Flags().Float64VarP(&gammaArg, "gamma", "Z", 1, "rotate horizontally double panels pages")
 	rootCmd.Flags().BoolVarP(&kindleFolderModeArg, "kindle-folder-mode", "k", false, "generate folder structure for Kindle devices")
 	rootCmd.Flags().BoolVarP(&leftToRightArg, "left-to-right", "p", false, "make reading direction left to right")
 	rootCmd.Flags().IntVarP(&fillVolumeNumberArg, "fill-volume-number", "n", 0, "fill volume number with leading zeros in title")

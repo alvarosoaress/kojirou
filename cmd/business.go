@@ -1,8 +1,14 @@
 package cmd
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"math"
 	"sort"
+	"sync"
 
 	"github.com/leotaku/kojirou/cmd/crop"
 	"github.com/leotaku/kojirou/cmd/filter"
@@ -77,6 +83,11 @@ func handleVolume(skeleton md.Manga, volume md.Volume, dir kindle.NormalizedDire
 			return fmt.Errorf("rotateDoublePage: %w", err)
 		}
 	}
+
+	// // Compress the images before processing
+	// if pages, err = compressPages(pages, 50); err != nil { // Example quality set to 75
+	// 	return fmt.Errorf("compressPages: %w", err)
+	// }
 
 	mangaForVolume := skeleton.WithChapters(volume.Sorted()).WithPages(pages)
 	mobi := kindle.GenerateMOBI(mangaForVolume)
@@ -153,25 +164,54 @@ func getCovers(manga *md.Manga) (md.ImageList, error) {
 
 	return covers, nil
 }
-
 func getPages(volume md.Volume, p formats.CliProgress) (md.ImageList, error) {
-	mangadexPages, err := download.MangadexPages(volume.Sorted().FilterBy(func(ci md.ChapterInfo) bool {
-		return ci.GroupNames.String() != "Filesystem"
-	}), dataSaverArg, p)
-	if err != nil {
-		p.Cancel("Error")
-		return nil, fmt.Errorf("mangadex: %w", err)
-	}
-	diskPages, err := disk.LoadPages(volume.Sorted().FilterBy(func(ci md.ChapterInfo) bool {
-		return ci.GroupNames.String() == "Filesystem"
-	}), p)
-	if err != nil {
-		p.Cancel("Error")
-		return nil, fmt.Errorf("disk: %w", err)
-	}
-	p.Done()
+    var wg sync.WaitGroup
+    var mu sync.Mutex
+    var combinedPages md.ImageList
+    var mangadexErr, diskErr error
 
-	return append(mangadexPages, diskPages...), nil
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        mangadexPages, err := download.MangadexPages(volume.Sorted().FilterBy(func(ci md.ChapterInfo) bool {
+            return ci.GroupNames.String() != "Filesystem"
+        }), dataSaverArg, p)
+        if err != nil {
+            p.Cancel("Error")
+            mangadexErr = fmt.Errorf("mangadex: %w", err)
+            return
+        }
+        mu.Lock()
+        combinedPages = append(combinedPages, mangadexPages...)
+        mu.Unlock()
+    }()
+
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        diskPages, err := disk.LoadPages(volume.Sorted().FilterBy(func(ci md.ChapterInfo) bool {
+            return ci.GroupNames.String() == "Filesystem"
+        }), p)
+        if err != nil {
+            p.Cancel("Error")
+            diskErr = fmt.Errorf("disk: %w", err)
+            return
+        }
+        mu.Lock()
+        combinedPages = append(combinedPages, diskPages...)
+        mu.Unlock()
+    }()
+
+    wg.Wait()
+    if mangadexErr != nil {
+        return nil, mangadexErr
+    }
+    if diskErr != nil {
+        return nil, diskErr
+    }
+
+    p.Done()
+    return combinedPages, nil
 }
 
 func autoCrop(pages md.ImageList) error {
@@ -248,54 +288,170 @@ func rotateDoublePage(pages md.ImageList) error {
 }
 
 func rotateAndSplit(pages md.ImageList) (md.ImageList, error) {
-	p := formats.VanishingProgress("Splitting..")
-	p.Increase(len(pages))
+    p := formats.VanishingProgress("Splitting..")
+    p.Increase(len(pages))
 
-	sort.Slice(pages, func(i, j int) bool {
-		return pages[i].ImageIdentifier < pages[j].ImageIdentifier
-	})
+    sort.Slice(pages, func(i, j int) bool {
+        return pages[i].ImageIdentifier < pages[j].ImageIdentifier
+    })
 
-	occupied := make(map[int]bool)
-	newPages := make(md.ImageList, len(pages))
-	copy(newPages, pages)
+    occupied := make(map[int]bool)
+    newPages := make(md.ImageList, len(pages))
+    copy(newPages, pages)
 
-	for i, page := range pages {
-		imgId := split.GetNextImageIdentifier(page.ImageIdentifier, occupied)
-		image := page.Image
+    gammaValue := gammaArg
 
-		if split.IsDoublePage(image) {
-			landscapeImage, _ := split.RotateImage(image)
-			newPages[i].Image = landscapeImage
-			newPages[i].ImageIdentifier = imgId
+    for i, page := range pages {
+        imgId := split.GetNextImageIdentifier(page.ImageIdentifier, occupied)
+        image := page.Image
 
-			leftImage, rightImage, _ := split.SplitVertically(image)
+        adjustedImage, err := AdjustGamma(image, gammaValue)
+        if err != nil {
+            return nil, err
+        }
 
-			rightPage := md.Image{
-				Image:             rightImage,
-				ChapterIdentifier: page.ChapterIdentifier,
-				VolumeIdentifier:  page.VolumeIdentifier,
-				ImageIdentifier:   imgId+1,
-			}
+        if split.IsDoublePage(adjustedImage) {
+            landscapeImage, _ := split.RotateImage(adjustedImage)
+            newPages[i].Image = landscapeImage
+            newPages[i].ImageIdentifier = imgId
 
-			leftPage := md.Image{
-				Image:             leftImage,
-				ChapterIdentifier: page.ChapterIdentifier,
-				VolumeIdentifier:  page.VolumeIdentifier,
-				ImageIdentifier:   imgId+2,
-			}
+            leftImage, rightImage, _ := split.SplitVertically(adjustedImage)
 
-			newPages = append(newPages, rightPage, leftPage)
-			occupied[rightPage.ImageIdentifier] = true
-			occupied[leftPage.ImageIdentifier] = true
-		} else {
-			newPages[i].Image = image
-			newPages[i].ImageIdentifier = imgId
-		}
+            rightPage := md.Image{
+                Image:             rightImage,
+                ChapterIdentifier: page.ChapterIdentifier,
+                VolumeIdentifier:  page.VolumeIdentifier,
+                ImageIdentifier:   imgId + 1,
+            }
 
-		occupied[imgId] = true
-		p.Add(1)
+            leftPage := md.Image{
+                Image:             leftImage,
+                ChapterIdentifier: page.ChapterIdentifier,
+                VolumeIdentifier:  page.VolumeIdentifier,
+                ImageIdentifier:   imgId + 2,
+            }
+
+            newPages = append(newPages, rightPage, leftPage)
+            occupied[rightPage.ImageIdentifier] = true
+            occupied[leftPage.ImageIdentifier] = true
+        } else {
+            newPages[i].Image = adjustedImage
+            newPages[i].ImageIdentifier = imgId
+        }
+
+        occupied[imgId] = true
+        p.Add(1)
+    }
+
+    p.Done()
+    return newPages, nil
+}
+
+
+func AdjustGamma(img image.Image, gamma float64) (image.Image, error) {
+    if gamma <= 0 {
+        return nil, fmt.Errorf("gamma must be greater than 0")
+    }
+
+	if gamma == 1 {
+		return img, nil
 	}
 
+    gammaLUT := make([]uint8, 256)
+    for i := 0; i < 256; i++ {
+        gammaLUT[i] = uint8(math.Min(255, math.Max(0, math.Pow(float64(i)/255.0, gamma)*255.0)))
+    }
+
+    bounds := img.Bounds()
+    adjustedImg := image.NewRGBA(bounds)
+
+    numGoroutines := 4
+    var wg sync.WaitGroup
+    wg.Add(numGoroutines)
+
+    processRange := func(startY, endY int) {
+        defer wg.Done()
+        for y := startY; y < endY; y++ {
+            for x := bounds.Min.X; x < bounds.Max.X; x++ {
+                originalColor := color.RGBAModel.Convert(img.At(x, y)).(color.RGBA)
+                adjustedColor := color.RGBA{
+                    R: gammaLUT[originalColor.R],
+                    G: gammaLUT[originalColor.G],
+                    B: gammaLUT[originalColor.B],
+                    A: originalColor.A,
+                }
+                adjustedImg.SetRGBA(x, y, adjustedColor)
+            }
+        }
+    }
+
+    height := bounds.Max.Y - bounds.Min.Y
+    chunkSize := height / numGoroutines
+    for i := 0; i < numGoroutines; i++ {
+        startY := bounds.Min.Y + i*chunkSize
+        endY := startY + chunkSize
+        if i == numGoroutines-1 {
+            endY = bounds.Max.Y
+        }
+        go processRange(startY, endY)
+    }
+
+    wg.Wait()
+
+    return adjustedImg, nil
+}
+
+// CompressImage compresses an image using JPEG format with the specified quality.
+func CompressImage(img image.Image, quality int) (image.Image, error) {
+	var buf bytes.Buffer
+	opts := &jpeg.Options{Quality: quality}
+
+	// Encode the image to JPEG format with the specified quality
+	if err := jpeg.Encode(&buf, img, opts); err != nil {
+		return nil, fmt.Errorf("failed to compress image: %w", err)
+	}
+
+	// Decode the JPEG back to image.Image
+	compressedImg, err := jpeg.Decode(&buf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode compressed image: %w", err)
+	}
+
+	return compressedImg, nil
+}
+
+// compressPages compresses each page in the ImageList using the specified quality.
+func compressPages(pages md.ImageList, quality int) (md.ImageList, error) {
+	p := formats.VanishingProgress("Compressing..")
+	p.Increase(len(pages))
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	compressedPages := make(md.ImageList, len(pages))
+
+	wg.Add(len(pages))
+	for i, page := range pages {
+		go func(i int, page md.Image) {
+			defer wg.Done()
+			compressedImg, err := CompressImage(page.Image, quality)
+			if err != nil {
+				p.Cancel("Error")
+				return
+			}
+			mu.Lock()
+			compressedPages[i] = md.Image{
+				Image:             compressedImg,
+				ChapterIdentifier: page.ChapterIdentifier,
+				VolumeIdentifier:  page.VolumeIdentifier,
+				ImageIdentifier:   page.ImageIdentifier,
+			}
+			mu.Unlock()
+			p.Add(1)
+		}(i, page)
+	}
+
+	wg.Wait()
 	p.Done()
-	return newPages, nil
+
+	return compressedPages, nil
 }
